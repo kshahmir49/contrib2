@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
+.vscode/
+.env
+*.pth
+*.pt
+*.ckpt
+runs/
+logs/
+checkpoints/
+*.out
+*.err
+*.log

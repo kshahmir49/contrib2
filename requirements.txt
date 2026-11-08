@@ -1,0 +1,10 @@
+numpy
+pandas
+matplotlib
+Pillow
+opencv-python
+torch
+torchvision
+gymnasium-robotics
+mujoco
+pettingzoo
