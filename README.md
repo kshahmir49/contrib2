@@ -38,12 +38,6 @@ python cold_start/pusher/proposed.py --steps 500000 --seed 0 --out-dir runs/push
 
 The default cold-start settings include 128 × 128 RGB frames, batch size 256, replay capacity 500,000, 120,000 warm-up steps, and 1,000 maximum steps per episode. Use five seeds for the evaluation protocol.
 
-## Checks
-
-```bash
-python -m unittest discover -s tests -v
-python -m compileall -q warm_start cold_start
-```
 
 This repository releases **only the proposed methods**. It does not include distributed DDQN, distributed SAC or HATRPO implementations. Residual adapters are used only in the proposed cold-start method.
 
