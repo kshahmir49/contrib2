@@ -1,10 +1,7 @@
 import argparse
 import os
 
-# Use MUJOCO_GL=egl or MUJOCO_GL=osmesa if your system needs it.
-
 import cv2
-import time
 import random
 import numpy as np
 from collections import deque
@@ -45,7 +42,7 @@ def make_env(render_mode="rgb_array", seed: int | None = None):
     return env
 
 
-INPUT_SIZE = 128  # speed/quality trade-off
+INPUT_SIZE = 128
 
 
 def preprocess_rgb(frame_rgb: np.ndarray) -> torch.Tensor:
@@ -61,16 +58,17 @@ class FrozenMobileNetEncoder(nn.Module):
         super().__init__()
         weights = MobileNet_V3_Small_Weights.DEFAULT
         m = mobilenet_v3_small(weights=weights)
-        self.backbone = m.features  # conv body
+        self.backbone = m.features
         for p in self.backbone.parameters():
             p.requires_grad = False
+        self.backbone.eval()
         # imagenet norm
         mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
         std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
         self.register_buffer("im_mean", mean)
         self.register_buffer("im_std", std)
         self.pool = nn.AdaptiveAvgPool2d(1)
-        # infer feat dim
+        # Output of MobileNetV3-Small feature body
         with torch.no_grad():
             dummy = torch.zeros(1, 3, INPUT_SIZE, INPUT_SIZE)
             f = self.pool(self.backbone(dummy)).flatten(1)
@@ -169,7 +167,7 @@ class TwinQ(nn.Module):
 # Replay buffer
 
 class ReplayBuffer:
-    def __init__(self, capacity=300_000):
+    def __init__(self, capacity=500_000):
         self.buf = deque(maxlen=capacity)
     def push(self, f, a, r, f2, d_term, s, s2):
         self.buf.append((f, a, r, f2, d_term, s, s2))
@@ -183,7 +181,6 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buf)
 
-# SAC Agent (per MaMuJoCo agent) with shared encoder
 
 @dataclass
 class SACConfig:
@@ -249,7 +246,6 @@ class SACAgent:
         s  = self.state_norm.normalize_tensor(s)
         s2 = self.state_norm.normalize_tensor(s2)
 
-        # ----- Critic update -----
         with torch.no_grad():
             a2_tanh, logp2, _ = self.policy.sample(f2)
             a2 = self._scale_to_env(a2_tanh)
@@ -263,7 +259,6 @@ class SACAgent:
         nn.utils.clip_grad_norm_(self.q.parameters(), cfg.grad_clip)
         self.opt_q.step()
 
-        # ----- Actor & alpha update -----
         a_tanh, logp, _ = self.policy.sample(f)
         a_pi = self._scale_to_env(a_tanh)
         q1_pi, q2_pi = self.q(s, a_pi)
@@ -278,7 +273,6 @@ class SACAgent:
         loss_alpha = -(self.log_alpha * (logp + self.target_entropy).detach()).mean()
         self.opt_alpha.zero_grad(); loss_alpha.backward(); self.opt_alpha.step()
 
-        # ----- Target update -----
         with torch.no_grad():
             for tp, p in zip(self.q_targ.parameters(), self.q.parameters()):
                 tp.data.mul_(1 - cfg.tau).add_(cfg.tau * p.data)
@@ -286,8 +280,8 @@ class SACAgent:
         return float(loss_q.item()), float(loss_pi.item()), float(torch.exp(self.log_alpha).item())
 
 
-def train_sac(total_steps_target=10000, episodes=200, max_steps=1000, seed=0, batch_size=256, warmup_steps=10_000,
-              updates_per_step=1, replay_capacity=300_000, fps=None):
+def train_sac(total_steps_target=500_000, max_steps=1000, seed=0, batch_size=256,
+              warmup_steps=120_000, updates_per_step=1, replay_capacity=500_000, fps=None):
     set_global_seed(seed)
     env = make_env(render_mode="rgb_array", seed=seed)
     agents = list(env.agents)
@@ -296,6 +290,7 @@ def train_sac(total_steps_target=10000, episodes=200, max_steps=1000, seed=0, ba
 
     # Shared visual encoder
     encoder = FrozenMobileNetEncoder().to(device)
+    encoder.eval()
     feat_dim = encoder.feat_dim
 
     # Per-agent SAC + buffers
@@ -315,7 +310,7 @@ def train_sac(total_steps_target=10000, episodes=200, max_steps=1000, seed=0, ba
     ep = 0
 
     # for ep in range(1, episodes + 1):
-    while total_steps <= total_steps_target:
+    while total_steps < total_steps_target:
         ep += 1
         _reset = env.reset(seed=seed + ep)
         obs = _reset[0] if isinstance(_reset, tuple) else _reset
@@ -328,7 +323,7 @@ def train_sac(total_steps_target=10000, episodes=200, max_steps=1000, seed=0, ba
         fvec = encoder.encode(img_t)  # [1, C]
 
         step = 0
-        while not all(done.values()) and step < max_steps:
+        while not all(done.values()) and step < max_steps and total_steps < total_steps_target:
             actions = {}
             for a in agents:
                 if done[a]:
@@ -392,11 +387,10 @@ def train_sac(total_steps_target=10000, episodes=200, max_steps=1000, seed=0, ba
 def main():
     parser = argparse.ArgumentParser(description="Train the proposed shared-perception SAC method")
     parser.add_argument("--steps", type=int, default=1_000_000)
-    parser.add_argument("--episodes", type=int, default=20_000)
     parser.add_argument("--max-steps", type=int, default=1000)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--warmup-steps", type=int, default=60000)
+    parser.add_argument("--warmup-steps", type=int, default=120000)
     parser.add_argument("--replay-capacity", type=int, default=500000)
     parser.add_argument("--out-dir", default="runs/standup")
     args = parser.parse_args()
@@ -404,7 +398,6 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     returns, agents = train_sac(
         total_steps_target=args.steps,
-        episodes=args.episodes,
         max_steps=args.max_steps,
         seed=args.seed,
         batch_size=args.batch_size,
